@@ -11,8 +11,9 @@ This folder is a ready-to-deploy static site — commit it as-is (or as your Pag
 | File | Purpose |
 |------|---------|
 | `index.html` | The self-contained app (all code + styles + favicons inlined). |
-| `apod-catalog.json` | Baked metadata catalog of the APOD archive. Fetched at runtime, must sit next to `index.html`. |
-| `build-catalog.mjs` | Rebuilds `apod-catalog.json` from NASA's APOD Basic JSON feed (see below). |
+| `apod-catalog.json` | Catalog of the APOD archive (date, title, credit, image URL, size, NASA link). Loaded at start; must sit next to `index.html`. |
+| `apod-text.json` | The photos' explanations, keyed by date. Loaded in the background (used for descriptions and search). |
+| `build-catalog.mjs` | Rebuilds `apod-catalog.json` and `apod-text.json` from NASA's APOD Basic JSON feed (see below). |
 | `cat-og.png` | Social share / Open Graph preview image. |
 | `favicon.png`, `favicon-32.png` | Icons (also inlined into `index.html`). |
 | `.nojekyll` | Empty file that tells GitHub Pages to skip Jekyll processing. |
@@ -54,20 +55,22 @@ the app and the catalog builder use the **APOD Basic JSON** feed, which the guid
 
 ## Refreshing the catalog
 
-The catalog is metadata only (titles, dates, credits, image URLs, pixel sizes, NASA page links) — no image files.
-No key is needed:
+The catalog is metadata only (titles, dates, credits, image URLs, pixel sizes, NASA page links, explanations) — no image files.
+No key is needed. Run it in this folder:
 
 ```bash
-node build-catalog.mjs > apod-catalog.json          # whole archive, 1995 → today (~470 requests, about 20 minutes)
+node build-catalog.mjs          # whole archive, 1995 → today (~470 requests, about 20 minutes)
 ```
 
-Commit the new `apod-catalog.json`. Old entries whose image NASA has replaced with a generic thumbnail
+Commit the new `apod-catalog.json` and `apod-text.json`. The newest photo is always fetched live, so the catalog only needs refreshing for Shuffle and search to include recent days. Old entries whose image NASA has replaced with a generic thumbnail
 (mostly small 1990s/2000s GIFs) and video days are skipped.
 
 ## How it works
 
-- On load it shows the **latest** APOD from the feed (falling back to the newest catalog entry).
-- **Shuffle / Prev / Next** walk a recency-weighted random ordering of the archive (keyboard: Space, ←, →; Esc closes menus).
+- On load it shows the **latest** APOD from the feed (falling back to the newest catalog entry), without waiting for the catalog.
+- **Shuffle** picks a random photo, weighted toward recent years. Two photos are kept ready in the background (checked and downloaded), so a shuffle is usually instant.
+- **Prev** steps back through what you've seen; **Latest** returns to today's photo. Keyboard: Space = shuffle, ← / → = back / forward through history, Home = latest, Esc closes menus.
+- Photos appear as a quick preview first, then sharpen when the full-size image arrives.
 - **Search** jumps to the best keyword match across titles + descriptions; press Enter again for the next match.
 - **More of this** finds a photo with a similar colour palette — and if a search term is active, it stays within that theme.
 - Optional text filter: photos that are mostly text or diagrams are skipped using in-browser OCR (tesseract.js).

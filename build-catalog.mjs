@@ -8,15 +8,16 @@
 // through using the X-WP-TotalPages header.
 //
 // USAGE (Node 18+, no npm install):
-//   node build-catalog.mjs > apod-catalog.json            # whole archive, 1995 → today
-//   node build-catalog.mjs 2026 > new.json                # one year (handy for quick refreshes)
+//   node build-catalog.mjs              # run in the site folder; writes apod-catalog.json + apod-text.json
 //
-// Output: newest-first JSON array of
-//   { date, title, credit, url, w, h, link, explanation }
+// Output (two files, so the app can start shuffling before the long texts arrive):
+//   apod-catalog.json — newest-first array of { date, title, credit, url, w, h, link }
+//   apod-text.json    — { "YYYY-MM-DD": explanation, … }, loaded by the app in the background
 // where url is the full-size image (assets.science.nasa.gov, resizable with ?w=&h=&fit=clip),
 // w/h are its pixel size (so the app can skip measuring), and link is the APOD page on science.nasa.gov.
 
 import process from 'node:process';
+import { writeFileSync } from 'node:fs';
 
 const FEED  = 'https://science.nasa.gov/wp-json/wp/v2/apod-basic';
 const PAUSE = 400;        // ms between requests — be polite to science.nasa.gov
@@ -56,7 +57,7 @@ async function getPage(from, to, page) {
 }
 
 const thisYear = new Date().getFullYear();
-const years = process.argv[2] ? [+process.argv[2]] : Array.from({ length: thisYear - FIRST_YEAR + 1 }, (_, i) => FIRST_YEAR + i);
+const years = Array.from({ length: thisYear - FIRST_YEAR + 1 }, (_, i) => FIRST_YEAR + i);
 
 const out = new Map();
 let requests = 0, skipped = 0;
@@ -82,5 +83,6 @@ for (const y of years) {
 }
 
 const rows = [...out.values()].sort((a, b) => (a.date < b.date ? 1 : -1)); // newest first
-process.stdout.write(JSON.stringify(rows));
-console.error(`\n✓ Done — ${rows.length} images (${skipped} videos/placeholders skipped) in ${requests} requests.`);
+writeFileSync('apod-catalog.json', JSON.stringify(rows.map(({ explanation, ...row }) => row)));
+writeFileSync('apod-text.json', JSON.stringify(Object.fromEntries(rows.map((r) => [r.date, r.explanation]))));
+console.error(`\n✓ Done — ${rows.length} images (${skipped} videos/placeholders skipped) in ${requests} requests → apod-catalog.json + apod-text.json`);
