@@ -1,94 +1,86 @@
 #!/usr/bin/env node
 // build-catalog.mjs
-// Builds an APOD METADATA catalog (no image files stored — just metadata + URLs).
-// The whole archive (1995 → today) is fetched in ~125 API calls using 3-month date
-// ranges (longer ranges now make the API time out with HTTP 500), which stays well
-// under NASA's ~1,000 requests/hour limit for a personal key.
+// Builds the APOD metadata catalog (no image files — just metadata + image URLs)
+// from NASA's "APOD Basic JSON" feed, the source the APOD Feed And API User Guide
+// recommends for sites and apps:
+//   https://science.nasa.gov/wp-json/wp/v2/apod-basic?date_from=YYMMDD&date_to=YYMMDD&per_page=25&page=N
+// No API key is needed. Results are capped at 25 per page, so each year is paged
+// through using the X-WP-TotalPages header.
 //
-// USAGE:
-//   1) Get a free key at https://api.nasa.gov  (instant, no cost)
-//   2) Run:
-//        NASA_KEY=your_key_here node build-catalog.mjs > apod-catalog.json
-//      (or)  node build-catalog.mjs your_key_here > apod-catalog.json
-//   3) Host apod-catalog.json somewhere CORS-friendly (GitHub raw, your site, etc.)
-//   4) In APOD-Shuffle-website.html, set:  this.bakedLibrary = 'https://.../apod-catalog.json';
+// USAGE (Node 18+, no npm install):
+//   node build-catalog.mjs > apod-catalog.json            # whole archive, 1995 → today
+//   node build-catalog.mjs 2026 > new.json                # one year (handy for quick refreshes)
 //
-// Re-run anytime to refresh (e.g. weekly) — the API is the source of truth, so
-// if NASA ever changes an image URL, regenerating picks up the new one automatically.
-//
-// Requires Node 18+ (built-in fetch). No npm install needed.
+// Output: newest-first JSON array of
+//   { date, title, credit, url, w, h, link, explanation }
+// where url is the full-size image (assets.science.nasa.gov, resizable with ?w=&h=&fit=clip),
+// w/h are its pixel size (so the app can skip measuring), and link is the APOD page on science.nasa.gov.
 
 import process from 'node:process';
 
-const KEY   = process.env.NASA_KEY || process.argv[2] || 'DEMO_KEY';
-const API   = 'https://api.nasa.gov/planetary/apod';
-const START = '1995-06-16';            // first APOD
-const PAUSE = 1500;
-const MONTHS_PER_CALL = 3;            // keep ranges short; a full year returns HTTP 500                    // ms between calls (polite; well under the limit)
+const FEED  = 'https://science.nasa.gov/wp-json/wp/v2/apod-basic';
+const PAUSE = 400;        // ms between requests — be polite to science.nasa.gov
+const FIRST_YEAR = 1995;  // first APOD: 1995-06-16
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const fmt   = (d) => d.toISOString().slice(0, 10);
+const yy = (y) => String(y % 100).padStart(2, '0');
 
-if (KEY === 'DEMO_KEY') {
-  console.error('⚠  Using DEMO_KEY (a few requests/hr) — a full build will be rate-limited. Use your own free key from api.nasa.gov.');
-}
+const NAMED = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ', rsquo: '’', lsquo: '‘',
+  rdquo: '”', ldquo: '“', ndash: '–', mdash: '—', hellip: '…', deg: '°',
+  eacute: 'é', ouml: 'ö', uuml: 'ü', auml: 'ä', aacute: 'á', iacute: 'í',
+  oacute: 'ó', ntilde: 'ñ', ccedil: 'ç', times: '×', copy: '©', middot: '·' };
+const decode = (s) => String(s || '')
+  .replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCodePoint(parseInt(h, 16)))
+  .replace(/&#(\d+);/g, (_, d) => String.fromCodePoint(+d))
+  .replace(/&([a-z]+);/gi, (m, n) => NAMED[n.toLowerCase()] ?? m);
+const text = (html) => decode(String(html || '').replace(/<[^>]*>/g, ' ')).replace(/\s+/g, ' ')
+  .replace(/\s+([.,;:!?)\]])/g, '$1').replace(/([(\[])\s+/g, '$1')
+  .replace(/\uFFFD/g, '\u2019').trim();   // no stray spaces where tags were removed; a few source texts have a broken apostrophe
 
-async function fetchRange(start, end) {
-  const url = `${API}?api_key=${KEY}&start_date=${start}&end_date=${end}`;
+// Some old posts have a generic NASA thumbnail instead of the day's picture; keep only real APOD images.
+const isApodImage = (u) => /^https:\/\/assets\.science\.nasa\.gov\/.+\/apod\//i.test(u || '');
+
+async function getPage(from, to, page) {
+  const url = `${FEED}?date_from=${from}&date_to=${to}&per_page=25&page=${page}`;
   for (let attempt = 0; attempt < 6; attempt++) {
     let r;
-    try { r = await fetch(url); } catch (e) { console.error('  network error, retrying…'); await sleep(5000); continue; }
-    if (r.status === 429) { console.error('  rate limited — waiting 60s…'); await sleep(60000); continue; }
-    if (!r.ok)            { console.error(`  HTTP ${r.status} — retrying…`); await sleep(4000); continue; }
-    try { return await r.json(); } catch (e) { console.error('  bad JSON — retrying…'); await sleep(4000); }
+    try { r = await fetch(url, { headers: { Accept: 'application/json' } }); }
+    catch (e) { console.error('  network error, retrying…'); await sleep(5000); continue; }
+    if (r.status === 429 || r.status >= 500) { console.error(`  HTTP ${r.status} — waiting…`); await sleep(15000 * (attempt + 1)); continue; }
+    if (r.status === 400 && page > 1) return { items: [], pages: page - 1 };   // past the last page
+    if (!r.ok) { console.error(`  HTTP ${r.status} for ${url}`); await sleep(4000); continue; }
+    try { return { items: await r.json(), pages: +(r.headers.get('x-wp-totalpages') || 1) }; }
+    catch (e) { console.error('  bad JSON — retrying…'); await sleep(4000); }
   }
-  console.error(`  giving up on ${start}..${end}`);
-  return [];
+  throw new Error(`giving up on ${url}`);
 }
 
-function* rangeChunks(start, end) {
-  let s = new Date(start);
-  while (s <= end) {
-    let e = new Date(s);
-    e.setMonth(e.getMonth() + MONTHS_PER_CALL);
-    e.setDate(e.getDate() - 1);
-    if (e > end) e = end;
-    yield [fmt(s), fmt(e)];
-    s = new Date(e);
-    s.setDate(s.getDate() + 1);
-  }
-}
+const thisYear = new Date().getFullYear();
+const years = process.argv[2] ? [+process.argv[2]] : Array.from({ length: thisYear - FIRST_YEAR + 1 }, (_, i) => FIRST_YEAR + i);
 
-const today = new Date();
-const out = [];
-let calls = 0;
-
-for (const [s, e] of rangeChunks(new Date(START), today)) {
-  const arr = await fetchRange(s, e);
-  calls++;
-  for (const j of (Array.isArray(arr) ? arr : [arr])) {
-    const src = (j && (j.hdurl || j.url)) || '';
-    // Since mid-2026 the API returns a NASA-logo placeholder ("NASA Science") for new dates.
-    const placeholder = /nasa-logo|science\.nasa\.gov\/wp-content\/themes/i.test(src) ||
-                        String(j && j.title || '').trim().toLowerCase() === 'nasa science';
-    if (j && j.media_type === 'image' && src && !placeholder) {
-      out.push({
-        date: j.date,
-        title: j.title || '',
-        credit: (j.copyright || '').replace(/\s+/g, ' ').trim(),
-        url: j.hdurl || j.url,
-        explanation: (j.explanation || '').replace(/\s+/g, ' ').trim()
-        // Optional fields the app will use IF present (add via an analysis pass later):
-        //   w, h            -> skip the in-app dimension check
-        //   words           -> skip the in-app OCR text check
-        //   color: {r,g,b}  -> skip the in-app color sampling ("More of this")
-      });
+const out = new Map();
+let requests = 0, skipped = 0;
+for (const y of years) {
+  let page = 1, pages = 1;
+  do {
+    const res = await getPage(`${yy(y)}0101`, `${yy(y)}1231`, page);
+    requests++; pages = res.pages;
+    for (const j of res.items) {
+      const hd = j.hdurl || '';
+      if (j.media_type !== 'image' || !isApodImage(hd) || !/^\d{4}-\d\d-\d\d$/.test(j.date || '')) { skipped++; continue; }
+      let w = 0, h = 0; try { const q = new URL(hd).searchParams; w = +q.get('w') || 0; h = +q.get('h') || 0; } catch (e) {}
+      const row = { date: j.date, title: text(j.title), credit: text(j.copyright || j.credit).replace(/^(Image\s+)?(Credit|Copyright)(\s*(&|and)\s*(Copyright|Credit))?\s*:\s*/i, ''), url: hd };
+      if (w && h) { row.w = w; row.h = h; }
+      row.link = j.permalink || j.url || '';
+      row.explanation = text(j.explanation).replace(/^Explanation:\s*/i, '');
+      out.set(j.date, row);
     }
-  }
-  console.error(`${s}..${e}  →  ${out.length} images so far`);
-  await sleep(PAUSE);
+    page++;
+    await sleep(PAUSE);
+  } while (page <= pages);
+  console.error(`${y}: ${out.size} images so far (${requests} requests)`);
 }
 
-out.sort((a, b) => (a.date < b.date ? 1 : -1)); // newest first
-process.stdout.write(JSON.stringify(out));
-console.error(`\n✓ Done — ${out.length} images in ${calls} API calls.`);
+const rows = [...out.values()].sort((a, b) => (a.date < b.date ? 1 : -1)); // newest first
+process.stdout.write(JSON.stringify(rows));
+console.error(`\n✓ Done — ${rows.length} images (${skipped} videos/placeholders skipped) in ${requests} requests.`);
